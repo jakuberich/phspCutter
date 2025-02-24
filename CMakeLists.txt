@@ -1,0 +1,14 @@
+CMAKE_MINIMUM_REQUIRED(VERSION 2.6 FATAL_ERROR)
+
+PROJECT(cutter)
+
+INCLUDE_DIRECTORIES(${PROJECT_SOURCE_DIR}/include)
+#  ${CMAKE_CURRENT_BINARY_DIR})
+
+FILE(GLOB sources ${PROJECT_SOURCE_DIR}/src/*.cpp)
+FILE(GLOB headers ${PROJECT_SOURCE_DIR}/include/*.hh)
+
+ADD_EXECUTABLE(Geant4phspCutter Geant4phspCutter.cc ${sources} ${headers})
+
+
+
