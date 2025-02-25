@@ -5,8 +5,8 @@
 #include <sys/stat.h>
 #include "iaea_phsp.h"    // functions operating on PHSP files
 #include "iaea_header.h"  // header handling
-#include "iaea_record.h"  // operations on records (particles)
-#include "utilities.h"    // utility functions
+#include "iaea_record.h"  // record (particle) operations
+#include "utilities.h"    // helper functions
 
 using namespace std;
 
@@ -17,7 +17,7 @@ const float X_MAX = 7.0f;
 const float Y_MIN = -7.0f;
 const float Y_MAX = 7.0f;
 
-// Helper function: removes output files if they already exist
+// Helper function: removes output files if they exist
 void removeOutputFiles(const char* baseName) {
     string headerFile = string(baseName) + ".IAEAheader";
     string phspFile   = string(baseName) + ".IAEAphsp";
@@ -36,15 +36,14 @@ int main(int argc, char* argv[]) {
     const char* inFile = argv[1];
     const char* outFile = argv[2];
     
-    // Remove any existing output files to ensure a clean start
+    // Remove any existing output files for a clean start
     removeOutputFiles(outFile);
     
-    IAEA_I32 src, dest;
-    IAEA_I32 res;
+    IAEA_I32 src, dest, res;
     int lenIn = strlen(inFile);
     int lenOut = strlen(outFile);
     
-    // Open the input file in read mode (access = 1)
+    // Open input source in read-only mode (access = 1)
     IAEA_I32 accessRead = 1;
     iaea_new_source(&src, const_cast<char*>(inFile), &accessRead, &res, lenIn);
     if (res < 0) {
@@ -52,15 +51,22 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
-    // Check file size and byte order compatibility
+    // Check file size and byte order of input file.
     iaea_check_file_size_byte_order(&src, &res);
     if (res != 0) {
-        cerr << "Error: input file size or byte order mismatch (code " << res << ")." << endl;
-        iaea_destroy_source(&src, &res);
-        return 1;
+        // If error code is -3 (size mismatch but byte order ok), we issue a warning and proceed.
+        if (res == -3) {
+            cerr << "Warning: Input file size does not match header checksum (code " 
+                 << res << "). Proceeding anyway." << endl;
+            res = 0;
+        } else {
+            cerr << "Error: input file size or byte order mismatch (code " << res << ")." << endl;
+            iaea_destroy_source(&src, &res);
+            return 1;
+        }
     }
     
-    // Open the output file in write mode (access = 2)
+    // Open output source in write mode (access = 2)
     IAEA_I32 accessWrite = 2;
     iaea_new_source(&dest, const_cast<char*>(outFile), &accessWrite, &res, lenOut);
     if (res < 0) {
@@ -69,7 +75,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
-    // Copy the header from the input file to the output file
+    // Copy header from input file to output file
     iaea_copy_header(&src, &dest, &res);
     if (res < 0) {
         cerr << "Error copying header from input source." << endl;
@@ -78,37 +84,36 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
-    // Modify the output header: disable storage of extra data
+    // Modify output header: disable extra data storage
     int zero = 0;
     iaea_set_extra_numbers(&dest, &zero, &zero);
     
-    // Also update statistics – reset the counts for original histories and particles
-    // We start with 0 and will sum up the accepted records.
+    // Reset statistics – we will count only accepted records
     IAEA_I64 acceptedHistories = 0;
     IAEA_I64 acceptedParticles = 0;
     
-    // Read records – we will filter them based on a condition
+    // Variables to hold particle record data.
     IAEA_I32 n_stat, partType;
     IAEA_Float E, wt, x, y, z, u, v, w;
-    // In this example, extra floats/longs are ignored (not written)
+    // In this example we ignore extra floats/longs.
     float dummyExtraFloats[NUM_EXTRA_FLOAT];
     IAEA_I32 dummyExtraInts[NUM_EXTRA_LONG];
     
-    // Counters for records read and errors encountered
-    IAEA_I64 count = 0;
-    int errorCount = 0;
-    
-    cout << "Processing input file (" << inFile << ")..." << endl;
-    
-    // Retrieve the expected number of records from the header
+    // Get expected number of records from header.
     IAEA_I64 expected;
     res = -1;
     iaea_get_max_particles(&src, &res, &expected);
-    // Assume the header contains one extra record – read expected - 1 records
+    // Assume header contains one extra record – process expected - 1 records.
     IAEA_I64 expectedRecords = (expected > 0) ? expected - 1 : expected;
     cout << "Expected records (from header): " << expectedRecords << endl;
     
-    // Particle reading loop
+    cout << "Processing input file (" << inFile << ")..." << endl;
+    
+    // Loop: read records and apply filter
+    IAEA_I64 count = 0;
+    int errorCount = 0;
+    const int ERROR_THRESHOLD = 10;
+    
     for (IAEA_I64 i = 0; i < expectedRecords; i++) {
         iaea_get_particle(&src, &n_stat, &partType, &E, &wt,
                           &x, &y, &z, &u, &v, &w,
@@ -123,20 +128,20 @@ int main(int argc, char* argv[]) {
             }
             continue;
         }
-        // Filter: recalculate (x,y) position at the Z_PLANE level
-        float newX, newY;
+        // Filter condition:
+        // If the particle is moving in the positive z direction and,
+        // at z = Z_PLANE, its (x,y) falls within [X_MIN, X_MAX] x [Y_MIN, Y_MAX],
+        // then accept (write) the particle.
         if (w > 0) {
+            float newX = x;
+            float newY = y;
             if (z < Z_PLANE) {
                 float t = (Z_PLANE - z) / w;
                 newX = x + u * t;
                 newY = y + v * t;
-            } else {
-                newX = x;
-                newY = y;
             }
-            // Check if (newX, newY) falls within the defined rectangle
             if (newX >= X_MIN && newX <= X_MAX && newY >= Y_MIN && newY <= Y_MAX) {
-                // Condition met – write the particle record
+                // Write accepted particle to output.
                 iaea_write_particle(&dest, &n_stat, &partType, &E, &wt,
                                     &x, &y, &z, &u, &v, &w,
                                     dummyExtraFloats, dummyExtraInts);
@@ -144,7 +149,6 @@ int main(int argc, char* argv[]) {
                 acceptedParticles++;
             }
         }
-        // If w <= 0 – the particle is not moving in the positive z-direction; skip it.
         count++;
         if (count % 1000000 == 0)
             cout << "Processed " << count << " records." << endl;
@@ -153,17 +157,15 @@ int main(int argc, char* argv[]) {
     cout << "Total records processed: " << count << endl;
     cout << "Accepted records (filtered): " << acceptedParticles << endl;
     
-    // Update the output header:
-    // Set the number of original histories based on the accepted records.
+    // Update output header statistics based on accepted records.
     iaea_set_total_original_particles(&dest, &acceptedHistories);
-    // Update the particle count in the header (usually iaea_update_header uses internal counters)
     iaea_update_header(&dest, &res);
     if (res < 0)
         cerr << "Error updating output header (code " << res << ")." << endl;
     else
         cout << "Output header updated successfully." << endl;
     
-    // Diagnostics: read the output PHSP file size based on its name
+    // Report output PHSP file size.
     string outPhspPath = string(outFile) + ".IAEAphsp";
     struct stat fileStatus;
     FILE* fp = fopen(outPhspPath.c_str(), "rb");
@@ -177,7 +179,7 @@ int main(int argc, char* argv[]) {
         cerr << "Cannot open output PHSP file for size check: " << outPhspPath << endl;
     }
     
-    // Close input and output sources
+    // Clean up: close input and output sources.
     iaea_destroy_source(&src, &res);
     iaea_destroy_source(&dest, &res);
     
